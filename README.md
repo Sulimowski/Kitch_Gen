@@ -58,8 +58,9 @@ Every run saves its results to `outputs/<object>_<time>/`:
 | `view.html` | the 3D viewer |
 
 <p align="center">
-  <img src="depth.png" width="560"><br>
-  <sub>A stereo point cloud coloured by distance from the camera: only the side facing the camera is there.</sub>
+  <img src="depth1.png" width="400">
+  <img src="depth.png" width="400"><br>
+  <sub>Stereo point clouds coloured by distance from the camera: only the side facing the camera is there.</sub>
 </p>
 
 ## What you can ask for
