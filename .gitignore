@@ -1,0 +1,13 @@
+myWork/
+torch_cheatsheet.md
+*.onnx
+*.onnx.data
+
+.venv/
+__pycache__/
+.idea/
+
+data/
+outputs/
+models/kitchgen_sdf_training.pt
+models/*.tmp
