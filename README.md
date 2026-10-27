@@ -23,8 +23,14 @@
 ---
 
 KitchGen turns a plain English description into a mesh of a kitchen object, then photographs it with
-a simulated stereo depth camera. You get the clean shape and the noisy, partial point cloud a real sensor would
-give you. That pair is handy for training and testing 3D perception models without a single real photo.
+a simulated stereo depth camera. You get the clean, complete shape and the noisy, one-sided point cloud a real
+sensor would give you.
+
+**Its main use is training data for point cloud completion.** That means teaching a network to work out an
+object's whole shape from the one side a camera sees, which a robot needs before it can grab a mug it has never
+seen. Collecting such data for real means 3D-scanning every object and lining each scan up with the camera.
+KitchGen makes as many pairs as you like, a few seconds each, with the exact shape and the exact camera pose.
+**[Make a dataset →](#make-a-shape-completion-dataset)**
 
 - **12 objects:** fork, spoon, knife, ladle, spatula, mug, cup (optionally on a saucer), bowl, plate, glass, wine glass, frying pan
 - **Any outline:** square, oval, hexagonal, fluted, twisted, barrel-shaped containers
@@ -53,15 +59,123 @@ Every run saves its results to `outputs/<object>_<time>/`:
 | `mesh.obj` | the object's mesh |
 | `cloud.ply` | the stereo point cloud in object coordinates (lines up with the mesh) |
 | `cloud_camera.ply` | the same cloud in camera coordinates, the way a real sensor hands it to you |
-| `depth.png` | the depth frame |
+| `depth.png` | a coloured picture of the depth frame |
 | `params.json` | what was understood from the text, every shape parameter, the camera pose and intrinsics |
 | `view.html` | the 3D viewer |
+
+## Make a shape completion dataset
 
 <p align="center">
   <img src="depth1.png" width="400">
   <img src="depth.png" width="400"><br>
-  <sub>Stereo point clouds coloured by distance from the camera: only the side facing the camera is there.</sub>
+  <sub>The network's input: a stereo point cloud, coloured by distance from the camera, with only the side facing
+  the camera. Its target: the whole object.</sub>
 </p>
+
+### 1. Generate
+
+Each sample is a new random object of the given kind, shot by a camera from a new random direction:
+
+```bash
+for kind in fork spoon knife ladle spatula mug cup bowl plate glass "wine glass" "frying pan"; do
+    python generate.py "$kind" --count 100 --wild --no-view --out dataset
+done
+```
+
+On Windows PowerShell:
+
+```powershell
+foreach ($kind in "fork","spoon","knife","ladle","spatula","mug","cup","bowl","plate","glass","wine glass","frying pan") {
+    python generate.py $kind --count 100 --wild --no-view --out dataset
+}
+```
+
+- `--wild` gives containers random outlines (square, oval, fluted, twisted…) for more variety.
+- A longer description narrows a kind down: `"tall glass"`, `"teacup with a saucer"`, `"8 inch chef's knife"`.
+- `--table` puts a table under the object, as in a real tabletop scene. The table's points are in the cloud too.
+- `--seed 0` makes the whole dataset reproducible.
+
+A sample takes 2–10 s and about 10 MB, so the 1200 samples above take roughly 1.5 hours and 11 GB.
+
+### 2. What you get
+
+```
+dataset/
+  mug_20261027_231500/
+    sample_000/
+      cloud.ply          input: the partial stereo cloud
+      cloud_camera.ply   the same cloud in the camera frame
+      mesh.obj           target: the complete object
+      params.json        object kind and parameters, camera pose and intrinsics
+      depth.png          a coloured picture of the depth frame
+    sample_001/
+    ...
+```
+
+- **Units and frames:** everything is in metres. `cloud.ply` and `mesh.obj` share the object's frame.
+- **Camera frame:** `cloud_camera.ply` equals `(cloud - eye) @ R.T`, where `eye` and `R` (`rotation_world_to_camera`)
+  are in `params.json`. Camera axes are x right, y down, z forward.
+- **Intrinsics:** `fx`, `fy`, with `cx = width / 2` and `cy = height / 2`.
+
+### 3. Load it
+
+The files are plain `.ply` and `.obj`, so Open3D or trimesh read them as well. With numpy alone:
+
+```python
+import json
+from pathlib import Path
+
+import numpy as np
+
+
+def load_sample(folder):
+    folder = Path(folder)
+    partial = np.loadtxt(folder / "cloud.ply", skiprows=7)
+    rows = [line.split() for line in open(folder / "mesh.obj")]
+    verts = np.array([r[1:] for r in rows if r and r[0] == "v"], float)
+    faces = np.array([r[1:] for r in rows if r and r[0] == "f"], int) - 1
+    info = json.loads((folder / "params.json").read_text())
+    return partial, verts, faces, info
+
+
+def sample_surface(verts, faces, n, rng=np.random.default_rng()):
+    tri = verts[faces]
+    area = np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+    t = tri[rng.choice(len(tri), n, p=area / area.sum())]
+    a, b = rng.random((2, n, 1))
+    flip = a + b > 1
+    a, b = np.where(flip, 1 - a, a), np.where(flip, 1 - b, b)
+    return t[:, 0] + a * (t[:, 1] - t[:, 0]) + b * (t[:, 2] - t[:, 0])
+
+
+partial, verts, faces, info = load_sample("dataset/mug_20261027_231500/sample_000")
+complete = sample_surface(verts, faces, 16384)
+```
+
+`partial` is the input, an (N, 3) array whose N changes from sample to sample. `complete` is the target: 16 384
+points spread evenly over the whole surface.
+
+### 4. Exact distances for implicit models
+
+Occupancy and SDF networks learn from query points labelled inside or outside, not from surface points. Run
+from the repository folder, KitchGen gives the exact signed distance to the object for any (N, 3) array of points
+(in metres, negative inside):
+
+```python
+from kitchgen.shapes import PARAM_CLASSES, shape_sdf
+
+sdf = shape_sdf(info["kind"], PARAM_CLASSES[info["kind"]](**info["params"]))
+distances = sdf(query_points)
+```
+
+### The same samples also fit
+
+| task | what to use |
+|---|---|
+| object classification from a point cloud | `kind` in `params.json` |
+| 6D pose estimation | the camera pose in `params.json`, exact by construction |
+| predicting dimensions from a scan | `params`: height, radius, wall thickness, number of prongs… |
+| depth completion for glass | glass and wine glass clouds are sparse and full of holes, as with a real camera; `mesh.obj` is the answer |
 
 ## What you can ask for
 
